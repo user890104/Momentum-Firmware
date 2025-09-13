@@ -10,11 +10,13 @@
 #include "../blocks/encoder.h"
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
+#include "../blocks/custom_btn_i.h"
+
+#include "../lib/aut64.h"
 
 // https://www.usenix.org/system/files/conference/usenixsecurity16/sec16_paper_garcia.pdf
 
 #define TAG "SubGhzProtocolVw2"
-#define TYPE 0xC0
 
 static const SubGhzBlockConst subghz_protocol_vw_2_const = {
     .te_short = 500,
@@ -32,7 +34,6 @@ struct SubGhzProtocolDecoderVw2 {
     ManchesterState manchester_saved_state;
 
     uint8_t data[10];
-    uint8_t type;
 };
 
 struct SubGhzProtocolEncoderVw2 {
@@ -86,6 +87,13 @@ const SubGhzProtocol subghz_protocol_vw_2 = {
     .encoder = &subghz_protocol_vw_2_encoder,
 
     .filter = SubGhzProtocolFilter_Cars,
+};
+
+// Key goes here
+const struct aut64_key key = {
+    .key = { 0 },
+    .pbox = { 0 },
+    .sbox = { 0 },
 };
 
 // there is a problem with the function in lib/toolbox/manchester_decoder, so it is reimplemented
@@ -157,9 +165,17 @@ static void subghz_protocol_decoder_vw_2_add_bit(SubGhzProtocolDecoderVw2* insta
 
 /**
  * Parses the raw data into separate fields
- * @param instance Pointer to a SubGhzProtocolDecoderVw2 instance
+ * @param generic Pointer to a SubGhzBlockGeneric instance
+ * @param data Pointer to uint8_t[10] (encrypted data)
  */
-static void subghz_protocol_vw_2_parse_data(SubGhzProtocolDecoderVw2* instance);
+static void subghz_protocol_vw_2_decode_data(SubGhzBlockGeneric* generic, const uint8_t* data);
+
+/**
+ * Combines the fields into raw data
+ * @param generic Pointer to a SubGhzBlockGeneric instance
+ * @param data Pointer to uint8_t[10] (encrypted data)
+ */
+static void subghz_protocol_vw_2_encode_data(SubGhzBlockGeneric* generic, uint8_t* data);
 
 void* subghz_protocol_encoder_vw_2_alloc(SubGhzEnvironment* environment) {
     UNUSED(environment);
@@ -183,6 +199,29 @@ void subghz_protocol_encoder_vw_2_free(void* context) {
     free(instance);
 }
 
+// Get custom button code
+static uint8_t subghz_protocol_encoder_vw_2_get_btn_code(void) {
+    uint8_t custom_btn_id = subghz_custom_btn_get();
+    uint8_t original_btn_code = subghz_custom_btn_get_original();
+    uint8_t btn = original_btn_code;
+
+    // Set custom button
+    if((custom_btn_id == SUBGHZ_CUSTOM_BTN_OK) && (original_btn_code != 0)) {
+        // Restore original button code
+        btn = original_btn_code;
+    } else if(custom_btn_id == SUBGHZ_CUSTOM_BTN_UP) {
+        btn = 0x1; // Unlock
+    } else if(custom_btn_id == SUBGHZ_CUSTOM_BTN_DOWN) {
+        btn = 0x2; // Lock
+    } else if(custom_btn_id == SUBGHZ_CUSTOM_BTN_LEFT) {
+        btn = 0x4; // Trunk
+    } else if(custom_btn_id == SUBGHZ_CUSTOM_BTN_RIGHT) {
+        btn = 0x8; // Panic
+    }
+
+    return btn;
+}
+
 /**
  * Generating an upload from data.
  * @param instance Pointer to a SubGhzProtocolEncoderVw2 instance
@@ -191,6 +230,26 @@ void subghz_protocol_encoder_vw_2_free(void* context) {
 static bool subghz_protocol_encoder_vw_2_get_upload(SubGhzProtocolEncoderVw2* instance) {
     furi_assert(instance);
     size_t index = 0;
+    
+    subghz_protocol_vw_2_decode_data(&instance->generic, instance->data);
+
+    // Save original button for later use
+    if (subghz_custom_btn_get_original() == 0) {
+        subghz_custom_btn_set_original(instance->generic.btn);
+    }
+    
+    instance->generic.btn = subghz_protocol_encoder_vw_2_get_btn_code();
+
+    int cnt_increment = furi_hal_subghz_get_rolling_counter_mult();
+    
+    if (instance->generic.cnt + cnt_increment < 0xFFFFFF) {
+        instance->generic.cnt += cnt_increment;
+    } else {
+        instance->generic.cnt = 0;
+    }
+    
+    subghz_protocol_vw_2_encode_data(&instance->generic, instance->data);
+    
     ManchesterEncoderState enc_state;
     manchester_encoder_reset(&enc_state);
     ManchesterEncoderResult result;
@@ -517,14 +576,24 @@ SubGhzProtocolStatus
         return SubGhzProtocolStatusErrorParserKey;
     }
 
-    subghz_protocol_vw_2_parse_data(instance);
+    subghz_protocol_vw_2_decode_data(&instance->generic, instance->data);
 
     return SubGhzProtocolStatusOk;
 }
 
-// 0b0001xxxx = Unlock
-// 0b0010xxxx = Lock
-// 0b0100xxxx = Trunk
+/*
+ * 0b0001xxxx = Unlock
+ * 0b0010xxxx = Lock
+ * 0b0100xxxx = Trunk
+ * 0b1000xxxx = Panic (US only)
+ * 
+ * It's highly unusual that someone presses more than one button at a time.
+ * This is very difficult as they need to be pressed at the exact same moment
+ * for the keyfob to actually generate a multi-button packet. Otherwise it's
+ * only transmitting the button which got pressed first. But if you manage
+ * to do it correctly, a multi-button packet can be received and decoded.
+ * It is untested how the car reacts to it.
+ */
 const char *subghz_protocol_vw_2_buttons[] = {
     "None",
     "Unlock",
@@ -534,41 +603,78 @@ const char *subghz_protocol_vw_2_buttons[] = {
     "Un+Tr",
     "Lk+Tr",
     "Un+Lk+Tr",
+    "Panic!",
+    "Unlock!",
+    "Lock!",
+    "Un+Lk!",
+    "Trunk!",
+    "Un+Tr!",
+    "Lk+Tr!",
+    "Un+Lk+Tr!",
 };
-
-static const char* subghz_protocol_vw_2_get_name_button(uint8_t btn) {
-    return subghz_protocol_vw_2_buttons[btn >> 4];
-}
 
 void subghz_protocol_decoder_vw_2_get_string(void* context, FuriString* output) {
     furi_assert(context);
     SubGhzProtocolDecoderVw2* instance = context;
-
-    furi_string_cat_printf(
-        output,
-        "%s %dbit\r\n"
-        "Type:0x%02X Btn:%s\r\n"
-        "Key:%016llX\r\n",
-        instance->generic.protocol_name, instance->generic.data_count_bit,
-        instance->type,
-        subghz_protocol_vw_2_get_name_button(instance->generic.btn),
-        instance->generic.data);
+    
+    switch (instance->data[0]) {
+        case 0xC0:
+            furi_string_cat_printf(
+                output,
+                "%s %dbit\r\n"
+                "%08X%08X%04X\r\n"
+                "UID:%08lX Cnt:%06lX\r\n"
+                "Type:%02X Btn:%s\r\n"
+                "\r\n",
+                instance->generic.protocol_name, instance->generic.data_count_bit,
+                instance->data[0] << 24 | instance->data[1] << 16 | instance->data[2] << 8 | instance->data[3],
+                instance->data[4] << 24 | instance->data[5] << 16 | instance->data[6] << 8 | instance->data[7],
+                instance->data[8] << 8 | instance->data[9],
+                instance->generic.serial, instance->generic.cnt,
+                instance->data[0], subghz_protocol_vw_2_buttons[instance->generic.btn]);
+            break;
+        default:
+            furi_string_cat_printf(
+                output,
+                "%s %dbit\r\n"
+                "%08X%08X%04X\r\n"
+                "Type:%02X\r\n"
+                "Unknown type/key\r\n",
+                instance->generic.protocol_name, instance->generic.data_count_bit,
+                instance->data[0] << 24 | instance->data[1] << 16 | instance->data[2] << 8 | instance->data[3],
+                instance->data[4] << 24 | instance->data[5] << 16 | instance->data[6] << 8 | instance->data[7],
+                instance->data[8] << 8 | instance->data[9],
+                instance->data[0]);
+            break;
+    }
 }
 
 void subghz_protocol_decoder_vw_2_get_string_brief(void* context, FuriString* output) {
     furi_assert(context);
     SubGhzProtocolDecoderVw2* instance = context;
-    subghz_protocol_vw_2_parse_data(instance);
-
-    uint8_t data_hash = subghz_protocol_blocks_xor_bytes(
-        (const uint8_t*)&instance->generic.data, sizeof(uint64_t));
+    subghz_protocol_vw_2_decode_data(&instance->generic, instance->data);
     
-    furi_string_cat_printf(
-        output,
-        "%s %s %02X",
-        instance->generic.protocol_name,
-        subghz_protocol_vw_2_get_name_button(instance->generic.btn),
-        data_hash);
+    uint8_t data_hash;
+    
+    switch (instance->data[0]) {
+        case 0xC0:
+            furi_string_cat_printf(
+                output,
+                "%s %08lX %s",
+                instance->generic.protocol_name,
+                instance->generic.serial,
+                subghz_protocol_vw_2_buttons[instance->generic.btn]);
+            break;
+        default:
+            data_hash = subghz_protocol_blocks_xor_bytes(
+                (const uint8_t*)&instance->data, 10);
+    
+            furi_string_cat_printf(
+                output,
+                "%s Unknown %02X",
+                instance->generic.protocol_name, data_hash);
+            break;
+    }
 }
 
 static LevelDuration
@@ -601,18 +707,83 @@ static LevelDuration
     return level_duration_make(data.level, data.duration);
 }
 
-static void subghz_protocol_vw_2_parse_data(SubGhzProtocolDecoderVw2* instance) {
-    furi_assert(instance);
+static void subghz_protocol_vw_2_decode_data(SubGhzBlockGeneric* generic, const uint8_t* data) {
+    furi_assert(generic);
 
-    instance->type = instance->data[0];
+    if (data[0] == 0xC0) {
+        const uint8_t* encrypted = data + 1;
+        uint8_t* decrypted = (uint8_t *)&generic->data;
 
-    instance->generic.data = 0;
+        FURI_LOG_D(TAG, "Before decrypt: %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9]);
+        memcpy(decrypted, encrypted, 8);
+        aut64_decrypt(key, decrypted);
+        FURI_LOG_D(TAG, "After decrypt: %02X%02X%02X%02X%02X%02X%02X%02X",
+            decrypted[0], decrypted[1], decrypted[2], decrypted[3], decrypted[4], decrypted[5], decrypted[6], decrypted[7]);
 
-    for(uint8_t i = 1; i < 9; i++) {
-        instance->generic.data = instance->generic.data << 8 | instance->data[i];
+        if (decrypted[7] >> 4 != data[9] >> 4) {
+            // Invalid packet
+            return;
+        }
+        
+        generic->serial = decrypted[0] << 24 | decrypted[1] << 16 | decrypted[2] << 8 | decrypted[3];
+        generic->cnt = decrypted[6] << 16 | decrypted[5] << 8 | decrypted[4];
+        generic->btn = decrypted[7] >> 4;
     }
 
-    instance->generic.btn = instance->data[9];
+    // Save original button for later use
+    if (subghz_custom_btn_get_original() == 0) {
+        subghz_custom_btn_set_original(generic->btn);
+    }
+    
+    subghz_custom_btn_set_max(4);
+}
+
+static void subghz_protocol_vw_2_encode_data(SubGhzBlockGeneric* generic, uint8_t* data) {
+    furi_assert(generic);
+    
+    if (data[0] == 0xC0) {
+        uint8_t* decrypted = (uint8_t *)&generic->data;
+        uint8_t* encrypted = data + 1;
+        
+        decrypted[0] = generic->serial >> 24;
+        decrypted[1] = (generic->serial >> 16) & 0xFF;
+        decrypted[2] = (generic->serial >> 8) & 0xFF;
+        decrypted[3] = generic->serial & 0xFF;
+        decrypted[4] = generic->cnt & 0xFF;
+        decrypted[5] = (generic->cnt >> 8) & 0xFF;
+        decrypted[6] = (generic->cnt >> 16) & 0xFF;
+        decrypted[7] = generic->btn << 4;
+        
+        FURI_LOG_D(TAG, "Before encrypt: %02X%02X%02X%02X%02X%02X%02X%02X",
+            decrypted[0], decrypted[1], decrypted[2], decrypted[3], decrypted[4], decrypted[5], decrypted[6], decrypted[7]);
+        memcpy(encrypted, decrypted, 8);
+        aut64_encrypt(key, encrypted);
+        
+        data[9] = generic->btn << 4;
+
+        switch (generic->btn) {
+            case 0x1:
+            case 0x6:
+                data[9] |= 0x0D;
+                break;
+            case 0x2:
+            case 0x5:
+                data[9] |= 0x0B;
+                break;
+            case 0x3:
+            case 0x4:
+                data[9] |= 0x07;
+                break;
+            case 0x7:
+                data[9] |= 0x01;
+                break;
+            // TODO 0x80 Panic button + combinations
+        }
+
+        FURI_LOG_D(TAG, "After encrypt: %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9]);
+    }
 }
 
 static void subghz_protocol_decoder_vw_2_add_bit(SubGhzProtocolDecoderVw2* instance, bool level) {
@@ -632,12 +803,6 @@ static void subghz_protocol_decoder_vw_2_add_bit(SubGhzProtocolDecoderVw2* insta
     instance->generic.data_count_bit++;
 
     if(instance->generic.data_count_bit >= subghz_protocol_vw_2_const.min_count_bit_for_found) {
-        if (instance->data[0] != TYPE) {
-            // unsupported type, discard for now
-            FURI_LOG_W(TAG, "Unsupported type 0x%02X", instance->data[0]);
-            return;
-        }
-        
         if(instance->base.callback) {
             instance->base.callback(&instance->base, instance->base.context);
         } else {
