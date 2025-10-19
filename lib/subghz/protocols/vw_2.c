@@ -339,6 +339,11 @@ SubGhzProtocolStatus
         return SubGhzProtocolStatusErrorEncoderGetUpload;
     }
 
+    if(!flipper_format_update_hex(flipper_format, "Key", instance->data, key_length)) {
+        FURI_LOG_E(TAG, "Unable to update Key");
+        return SubGhzProtocolStatusErrorParserKey;
+    }
+            
     instance->encoder.is_running = true;
 
     return SubGhzProtocolStatusOk;
