@@ -221,8 +221,6 @@ struct SubGhzProtocolDecoderVw2 {
     SubGhzBlockGeneric generic;
 
     ManchesterState manchester_saved_state;
-
-    uint8_t data[10];
 };
 
 struct SubGhzProtocolEncoderVw2 {
@@ -230,8 +228,6 @@ struct SubGhzProtocolEncoderVw2 {
 
     SubGhzProtocolBlockEncoder encoder;
     SubGhzBlockGeneric generic;
-
-    uint8_t data[10];
 };
 
 typedef enum {
@@ -274,7 +270,6 @@ const SubGhzProtocol subghz_protocol_vw_2 = {
             SubGhzProtocolFlag_Load | SubGhzProtocolFlag_Save | SubGhzProtocolFlag_Send,    
     .decoder = &subghz_protocol_vw_2_decoder,
     .encoder = &subghz_protocol_vw_2_encoder,
-
     .filter = SubGhzProtocolFilter_Cars,
 };
 
@@ -355,16 +350,20 @@ static void subghz_protocol_decoder_vw_2_add_bit(SubGhzProtocolDecoderVw2* insta
 /**
  * Parses the raw data into separate fields
  * @param generic Pointer to a SubGhzBlockGeneric instance
- * @param data Pointer to uint8_t[10] (encrypted data)
  */
-static void subghz_protocol_vw_2_decode_data(SubGhzBlockGeneric* generic, const uint8_t* data);
+static void subghz_protocol_vw_2_decode_data(SubGhzBlockGeneric* generic);
 
 /**
  * Combines the fields into raw data
  * @param generic Pointer to a SubGhzBlockGeneric instance
- * @param data Pointer to uint8_t[10] (encrypted data)
  */
-static void subghz_protocol_vw_2_encode_data(SubGhzBlockGeneric* generic, uint8_t* data);
+static void subghz_protocol_vw_2_encode_data(SubGhzBlockGeneric* generic);
+
+/**
+ * Maps the bit number of the raw data to the bit index data and data_2. Sets bit 7 if data_2 should be used.
+ * @param bit The bit number
+ */
+static uint8_t subghz_protocol_vw_2_get_bit_index(const uint8_t bit);
 
 void* subghz_protocol_encoder_vw_2_alloc(SubGhzEnvironment* environment) {
     UNUSED(environment);
@@ -420,7 +419,7 @@ static bool subghz_protocol_encoder_vw_2_get_upload(SubGhzProtocolEncoderVw2* in
     furi_assert(instance);
     size_t index = 0;
     
-    subghz_protocol_vw_2_decode_data(&instance->generic, instance->data);
+    subghz_protocol_vw_2_decode_data(&instance->generic);
 
     // Save original button for later use
     if (subghz_custom_btn_get_original() == 0) {
@@ -437,7 +436,7 @@ static bool subghz_protocol_encoder_vw_2_get_upload(SubGhzProtocolEncoderVw2* in
         instance->generic.cnt = 0;
     }
     
-    subghz_protocol_vw_2_encode_data(&instance->generic, instance->data);
+    subghz_protocol_vw_2_encode_data(&instance->generic);
     
     ManchesterEncoderState enc_state;
     manchester_encoder_reset(&enc_state);
@@ -462,12 +461,12 @@ static bool subghz_protocol_encoder_vw_2_get_upload(SubGhzProtocolEncoderVw2* in
     }
 
     // Send key data
-    uint8_t max_byte_index = instance->generic.data_count_bit / 8 - 1;
-
     for(uint8_t i = instance->generic.data_count_bit; i > 0; i--) {
-        uint8_t bit_index = i - 1;
-        uint8_t byte_index = max_byte_index - bit_index / 8;
-        bool bit_is_set = !bit_read(instance->data[byte_index], bit_index & 0x07);
+		const uint8_t bit_index_masked = subghz_protocol_vw_2_get_bit_index(i - 1);
+		const uint8_t bit_index = bit_index_masked & 0x7F;
+		const bool bit_is_set = !(bit_read(bit_index_masked, 7) ?
+			bit_read(instance->generic.data_2, bit_index) : // use data_2
+			bit_read(instance->generic.data, bit_index));    // use data
 
         if(!manchester_encoder_advance(&enc_state, bit_is_set, &result)) {
             instance->encoder.upload[index++] =
@@ -493,46 +492,60 @@ SubGhzProtocolStatus
     subghz_protocol_encoder_vw_2_deserialize(void* context, FlipperFormat* flipper_format) {
     furi_assert(context);
     SubGhzProtocolEncoderVw2* instance = context;
-
     SubGhzProtocolStatus ret =
-        subghz_block_generic_deserialize(&instance->generic, flipper_format);
-    if(ret != SubGhzProtocolStatusOk) {
+		subghz_block_generic_deserialize_check_count_bit(&instance->generic, flipper_format,
+		subghz_protocol_vw_2_const.min_count_bit_for_found);
+
+    if (ret != SubGhzProtocolStatusOk) {
         return ret;
-    }
-
-    // Generic key is too small, so we reset it and rewind to get real, longer, data
-    instance->generic.data = 0;
-
-    if(instance->generic.data_count_bit !=
-       subghz_protocol_vw_2_const.min_count_bit_for_found) {
-        FURI_LOG_E(TAG, "Wrong number of bits in key");
-        return SubGhzProtocolStatusErrorValueBitCount;
-       }
-
-    if(!flipper_format_rewind(flipper_format)) {
-        FURI_LOG_E(TAG, "Rewind error");
-        return SubGhzProtocolStatusErrorParserOthers;
-    }
-
-    size_t key_length = instance->generic.data_count_bit / 8;
-
-    if(!flipper_format_read_hex(flipper_format, "Key", instance->data, key_length)) {
-        FURI_LOG_E(TAG, "Unable to read Key in encoder");
-        return SubGhzProtocolStatusErrorParserKey;
     }
 
     // optional parameter
     flipper_format_read_uint32(flipper_format, "Repeat", (uint32_t*)&instance->encoder.repeat, 1);
 
-    if(!subghz_protocol_encoder_vw_2_get_upload(instance)) {
+    if (!flipper_format_rewind(flipper_format)) {
+        FURI_LOG_E(TAG, "Rewind error");
+        return SubGhzProtocolStatusErrorParserOthers;
+    }
+
+	uint8_t key_data[sizeof(uint64_t)] = { 0 };
+
+    if (!flipper_format_read_hex(flipper_format, "Data", key_data, sizeof(uint64_t))) {
+        FURI_LOG_E(TAG, "Unable to read Data in encoder");
+        return SubGhzProtocolStatusErrorParserOthers;
+    }
+
+	for (uint8_t i = 0; i < sizeof(uint64_t); i++) {
+        instance->generic.data_2 = instance->generic.data_2 << 8 | key_data[i];
+    }
+
+    if (!subghz_protocol_encoder_vw_2_get_upload(instance)) {
         return SubGhzProtocolStatusErrorEncoderGetUpload;
     }
 
-    if(!flipper_format_update_hex(flipper_format, "Key", instance->data, key_length)) {
+    if (!flipper_format_rewind(flipper_format)) {
+        FURI_LOG_E(TAG, "Rewind error after get_upload");
+        return SubGhzProtocolStatusErrorParserOthers;
+    }
+
+    for (size_t i = 0; i < sizeof(uint64_t); i++) {
+        key_data[sizeof(uint64_t) - i - 1] = (instance->generic.data >> (i * 8)) & 0xFF;
+    }
+
+    if (!flipper_format_update_hex(flipper_format, "Key", key_data, sizeof(uint64_t))) {
         FURI_LOG_E(TAG, "Unable to update Key");
         return SubGhzProtocolStatusErrorParserKey;
     }
-            
+
+	for (size_t i = 0; i < sizeof(uint64_t); i++) {
+        key_data[sizeof(uint64_t) - i - 1] = (instance->generic.data_2 >> (i * 8)) & 0xFF;
+    }
+
+    if (!flipper_format_update_hex(flipper_format, "Data", key_data, sizeof(uint64_t))) {
+        FURI_LOG_E(TAG, "Unable to update Data");
+        return SubGhzProtocolStatusErrorParserOthers;
+    }
+
     instance->encoder.is_running = true;
 
     return SubGhzProtocolStatusOk;
@@ -579,7 +592,6 @@ void subghz_protocol_decoder_vw_2_reset(void* context) {
     furi_assert(context);
     SubGhzProtocolDecoderVw2* instance = context;
     instance->decoder.parser_step = Vw2DecoderStepReset;
-    memset(instance->data, 0, 10);
     instance->generic.data_count_bit = 0;
     instance->manchester_saved_state = 0;
 }
@@ -648,6 +660,8 @@ void subghz_protocol_decoder_vw_2_feed(void* context, bool level, uint32_t durat
                 ManchesterEventShortHigh,
                 &instance->manchester_saved_state,
                 NULL);
+			instance->decoder.decode_count_bit = 0;
+			instance->decoder.decode_data = 0;
             instance->decoder.parser_step = Vw2DecoderStepFoundData;
             break;
         }
@@ -680,6 +694,10 @@ void subghz_protocol_decoder_vw_2_feed(void* context, bool level, uint32_t durat
                    event,
                    &instance->manchester_saved_state,
                    &new_level)) {
+				if (instance->generic.data_count_bit >= 8 && instance->generic.data_count_bit < 72) {
+					subghz_protocol_blocks_add_bit(&instance->decoder, new_level);
+				}
+
                 subghz_protocol_decoder_vw_2_add_bit(instance, new_level);
             }
         }
@@ -690,18 +708,7 @@ void subghz_protocol_decoder_vw_2_feed(void* context, bool level, uint32_t durat
 uint32_t subghz_protocol_decoder_vw_2_get_hash_data(void* context) {
     furi_assert(context);
     SubGhzProtocolDecoderVw2* instance = context;
-
-    union {
-        uint32_t full;
-        uint8_t split[4];
-    } hash = {0};
-    size_t key_length = instance->generic.data_count_bit / 8;
-
-    for(size_t i = 0; i < key_length; i++) {
-        hash.split[i % sizeof(hash)] ^= instance->data[i];
-    }
-
-    return hash.full;
+    return subghz_protocol_blocks_get_hash_data_long(&instance->decoder, sizeof(uint64_t));
 }
 
 SubGhzProtocolStatus subghz_protocol_decoder_vw_2_serialize(
@@ -711,31 +718,29 @@ SubGhzProtocolStatus subghz_protocol_decoder_vw_2_serialize(
     furi_assert(context);
 
     SubGhzProtocolDecoderVw2* instance = context;
-    SubGhzProtocolStatus res = SubGhzProtocolStatusError;
+    SubGhzProtocolStatus ret = subghz_block_generic_serialize(&instance->generic, flipper_format, preset);
 
-    do {
-        res = subghz_block_generic_serialize(&instance->generic, flipper_format, preset);
-        if(res != SubGhzProtocolStatusOk) {
-            break;
-        }
+	if (ret != SubGhzProtocolStatusOk) {
+		return ret;
+	}
 
-        // Generic key is too small, so it writes empty and we update here with real, longer, data
-        if(!flipper_format_rewind(flipper_format)) {
-            FURI_LOG_E(TAG, "Rewind error");
-            res = SubGhzProtocolStatusErrorParserOthers;
-            break;
-        }
+    if (!flipper_format_rewind(flipper_format)) {
+        FURI_LOG_E(TAG, "Rewind error");
+        return SubGhzProtocolStatusErrorParserOthers;
+    }
 
-        uint16_t key_length = instance->generic.data_count_bit / 8;
+    uint8_t key_data[sizeof(uint64_t)] = { 0 };
 
-        if(!flipper_format_update_hex(flipper_format, "Key", instance->data, key_length)) {
-            FURI_LOG_E(TAG, "Unable to update Key");
-            res = SubGhzProtocolStatusErrorParserKey;
-            break;
-        }
-    } while(false);
+    for (size_t i = 0; i < sizeof(uint64_t); i++) {
+        key_data[sizeof(uint64_t) - i - 1] = (instance->generic.data_2 >> (i * 8)) & 0xFF;
+    }
 
-    return res;
+    if (!flipper_format_insert_or_update_hex(flipper_format, "Data", key_data, sizeof(uint64_t))) {
+        FURI_LOG_E(TAG, "Unable to update Data");
+        return SubGhzProtocolStatusErrorParserOthers;
+    }
+
+    return SubGhzProtocolStatusOk;
 }
 
 SubGhzProtocolStatus
@@ -744,33 +749,30 @@ SubGhzProtocolStatus
     SubGhzProtocolDecoderVw2* instance = context;
 
     SubGhzProtocolStatus ret =
-        subghz_block_generic_deserialize(&instance->generic, flipper_format);
-    if(ret != SubGhzProtocolStatusOk) {
+		subghz_block_generic_deserialize_check_count_bit(&instance->generic, flipper_format,
+		subghz_protocol_vw_2_const.min_count_bit_for_found);
+
+    if (ret != SubGhzProtocolStatusOk) {
         return ret;
     }
 
-    // Generic key is too small, so we reset it and rewind to get real, longer, data
-    instance->generic.data = 0;
-
-    if(instance->generic.data_count_bit !=
-       subghz_protocol_vw_2_const.min_count_bit_for_found) {
-        FURI_LOG_E(TAG, "Wrong number of bits in key");
-        return SubGhzProtocolStatusErrorValueBitCount;
-       }
-
-    if(!flipper_format_rewind(flipper_format)) {
+    if (!flipper_format_rewind(flipper_format)) {
         FURI_LOG_E(TAG, "Rewind error");
         return SubGhzProtocolStatusErrorParserOthers;
     }
 
-    size_t key_length = instance->generic.data_count_bit / 8;
+    uint8_t key_data[sizeof(uint64_t)] = { 0 };
 
-    if(!flipper_format_read_hex(flipper_format, "Key", instance->data, key_length)) {
-        FURI_LOG_E(TAG, "Unable to read Key in decoder");
-        return SubGhzProtocolStatusErrorParserKey;
+    if (!flipper_format_read_hex(flipper_format, "Data", key_data, sizeof(uint64_t))) {
+        FURI_LOG_E(TAG, "Missing Data");
+        return SubGhzProtocolStatusErrorParserOthers;
     }
 
-    subghz_protocol_vw_2_decode_data(&instance->generic, instance->data);
+    for (uint8_t i = 0; i < sizeof(uint64_t); i++) {
+        instance->generic.data_2 = instance->generic.data_2 << 8 | key_data[i];
+    }
+
+    subghz_protocol_vw_2_decode_data(&instance->generic);
 
     return SubGhzProtocolStatusOk;
 }
@@ -811,34 +813,32 @@ void subghz_protocol_decoder_vw_2_get_string(void* context, FuriString* output) 
     furi_assert(context);
     SubGhzProtocolDecoderVw2* instance = context;
     
-    switch (instance->data[0]) {
+	uint8_t type = (instance->generic.data_2 >> 8) & 0xFF;
+
+    switch (type) {
         case 0xC0:
             furi_string_cat_printf(
                 output,
                 "%s %dbit\r\n"
-                "%08X%08X%04X\r\n"
+                "%02X%016llX%02X\r\n"
                 "UID:%08lX Cnt:%06lX\r\n"
                 "Type:%02X Btn:%s\r\n"
                 "\r\n",
                 instance->generic.protocol_name, instance->generic.data_count_bit,
-                instance->data[0] << 24 | instance->data[1] << 16 | instance->data[2] << 8 | instance->data[3],
-                instance->data[4] << 24 | instance->data[5] << 16 | instance->data[6] << 8 | instance->data[7],
-                instance->data[8] << 8 | instance->data[9],
+				(uint8_t)((instance->generic.data_2 >> 8) & 0xFF), instance->generic.data, (uint8_t)(instance->generic.data_2 & 0xFF),
                 instance->generic.serial, instance->generic.cnt,
-                instance->data[0], subghz_protocol_vw_2_buttons[instance->generic.btn]);
+                type, subghz_protocol_vw_2_buttons[instance->generic.btn]);
             break;
         default:
             furi_string_cat_printf(
                 output,
                 "%s %dbit\r\n"
-                "%08X%08X%04X\r\n"
+                "%02X%016llX%02X\r\n"
                 "Type:%02X\r\n"
                 "Unknown type/key\r\n",
                 instance->generic.protocol_name, instance->generic.data_count_bit,
-                instance->data[0] << 24 | instance->data[1] << 16 | instance->data[2] << 8 | instance->data[3],
-                instance->data[4] << 24 | instance->data[5] << 16 | instance->data[6] << 8 | instance->data[7],
-                instance->data[8] << 8 | instance->data[9],
-                instance->data[0]);
+				(uint8_t)((instance->generic.data_2 >> 8) & 0xFF), instance->generic.data, (uint8_t)(instance->generic.data_2 & 0xFF),
+                type);
             break;
     }
 }
@@ -846,11 +846,11 @@ void subghz_protocol_decoder_vw_2_get_string(void* context, FuriString* output) 
 void subghz_protocol_decoder_vw_2_get_string_brief(void* context, FuriString* output) {
     furi_assert(context);
     SubGhzProtocolDecoderVw2* instance = context;
-    subghz_protocol_vw_2_decode_data(&instance->generic, instance->data);
+    subghz_protocol_vw_2_decode_data(&instance->generic);
     
-    uint8_t data_hash;
+	uint8_t type = (instance->generic.data_2 >> 8) & 0xFF;
     
-    switch (instance->data[0]) {
+    switch (type) {
         case 0xC0:
             furi_string_cat_printf(
                 output,
@@ -860,8 +860,8 @@ void subghz_protocol_decoder_vw_2_get_string_brief(void* context, FuriString* ou
                 subghz_protocol_vw_2_buttons[instance->generic.btn]);
             break;
         default:
-            data_hash = subghz_protocol_blocks_xor_bytes(
-                (const uint8_t*)&instance->data, 10);
+            uint8_t data_hash = subghz_protocol_blocks_xor_bytes(
+                (const uint8_t*)&instance->generic.data, sizeof(uint64_t));
     
             furi_string_cat_printf(
                 output,
@@ -901,28 +901,33 @@ static LevelDuration
     return level_duration_make(data.level, data.duration);
 }
 
-static void subghz_protocol_vw_2_decode_data(SubGhzBlockGeneric* generic, const uint8_t* data) {
+static void subghz_protocol_vw_2_decode_data(SubGhzBlockGeneric* generic) {
     furi_assert(generic);
 
-    if (data[0] == 0xC0) {
-        const uint8_t* encrypted = data + 1;
-        uint8_t* decrypted = (uint8_t *)&generic->data;
+	uint8_t type = (generic->data_2 >> 8) & 0xFF;
 
-        FURI_LOG_D(TAG, "Before decrypt: %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
-            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9]);
-        memcpy(decrypted, encrypted, 8);
-        aut64_decrypt(key, decrypted);
-        FURI_LOG_D(TAG, "After decrypt: %02X%02X%02X%02X%02X%02X%02X%02X",
-            decrypted[0], decrypted[1], decrypted[2], decrypted[3], decrypted[4], decrypted[5], decrypted[6], decrypted[7]);
+    if (type == 0xC0) {
+		FURI_LOG_D(TAG, "Before decrypt: %016llX", generic->data);
 
-        if (decrypted[7] >> 4 != data[9] >> 4) {
-            // Invalid packet
+	    union {
+	        uint64_t full;
+	        uint8_t split[sizeof(uint64_t)];
+	    } data = { 0 };
+
+		data.full = REVERSE_BYTES_U64(generic->data);
+
+		aut64_decrypt(key, data.split);
+
+		FURI_LOG_D(TAG, "After decrypt: %016llX", REVERSE_BYTES_U64(data.full));
+
+        if (data.split[7] != (generic->data_2 & 0xF0)) {
+            FURI_LOG_W(TAG, "Error decrypting packet");
             return;
         }
         
-        generic->serial = decrypted[0] << 24 | decrypted[1] << 16 | decrypted[2] << 8 | decrypted[3];
-        generic->cnt = decrypted[6] << 16 | decrypted[5] << 8 | decrypted[4];
-        generic->btn = decrypted[7] >> 4;
+        generic->serial = data.split[0] << 24 | data.split[1] << 16 | data.split[2] << 8 | data.split[3];
+        generic->cnt = data.split[6] << 16 | data.split[5] << 8 | data.split[4];
+        generic->btn = data.split[7] >> 4;
     }
 
     // Save original button for later use
@@ -933,51 +938,84 @@ static void subghz_protocol_vw_2_decode_data(SubGhzBlockGeneric* generic, const 
     subghz_custom_btn_set_max(4);
 }
 
-static void subghz_protocol_vw_2_encode_data(SubGhzBlockGeneric* generic, uint8_t* data) {
+static void subghz_protocol_vw_2_encode_data(SubGhzBlockGeneric* generic) {
     furi_assert(generic);
-    
-    if (data[0] == 0xC0) {
-        uint8_t* decrypted = (uint8_t *)&generic->data;
-        uint8_t* encrypted = data + 1;
-        
-        decrypted[0] = generic->serial >> 24;
-        decrypted[1] = (generic->serial >> 16) & 0xFF;
-        decrypted[2] = (generic->serial >> 8) & 0xFF;
-        decrypted[3] = generic->serial & 0xFF;
-        decrypted[4] = generic->cnt & 0xFF;
-        decrypted[5] = (generic->cnt >> 8) & 0xFF;
-        decrypted[6] = (generic->cnt >> 16) & 0xFF;
-        decrypted[7] = generic->btn << 4;
-        
-        FURI_LOG_D(TAG, "Before encrypt: %02X%02X%02X%02X%02X%02X%02X%02X",
-            decrypted[0], decrypted[1], decrypted[2], decrypted[3], decrypted[4], decrypted[5], decrypted[6], decrypted[7]);
-        memcpy(encrypted, decrypted, 8);
-        aut64_encrypt(key, encrypted);
-        
-        data[9] = generic->btn << 4;
 
+	uint8_t type = (generic->data_2 >> 8) & 0xFF;
+
+    if (type == 0xC0) {
+	    union {
+	        uint64_t full;
+	        uint8_t split[sizeof(uint64_t)];
+	    } data = { 0 };
+
+		data.split[0] = generic->serial >> 24;
+		data.split[1] = (generic->serial >> 16) & 0xFF;
+		data.split[2] = (generic->serial >> 8) & 0xFF;
+		data.split[3] = generic->serial & 0xFF;
+        data.split[4] = generic->cnt & 0xFF;
+        data.split[5] = (generic->cnt >> 8) & 0xFF;
+        data.split[6] = (generic->cnt >> 16) & 0xFF;
+        data.split[7] = generic->btn << 4;
+
+		FURI_LOG_D(TAG, "Before encrypt: %016llX", REVERSE_BYTES_U64(data.full));
+
+        aut64_encrypt(key, data.split);
+
+        generic->data = REVERSE_BYTES_U64(data.full);
+
+		FURI_LOG_D(TAG, "After encrypt: %016llX", generic->data);
+
+        generic->data_2 = type << 8;
+        generic->data_2 |= generic->btn << 4;
+
+		// check digit of button
         switch (generic->btn) {
             case 0x1:
             case 0x6:
-                data[9] |= 0x0D;
+                generic->data_2 |= 0x0D;
                 break;
             case 0x2:
             case 0x5:
-                data[9] |= 0x0B;
+                generic->data_2 |= 0x0B;
                 break;
             case 0x3:
             case 0x4:
-                data[9] |= 0x07;
+                generic->data_2 |= 0x07;
                 break;
             case 0x7:
-                data[9] |= 0x01;
+                generic->data_2 |= 0x01;
                 break;
             // TODO 0x80 Panic button + combinations
         }
-
-        FURI_LOG_D(TAG, "After encrypt: %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
-            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9]);
     }
+}
+
+static uint8_t subghz_protocol_vw_2_get_bit_index(const uint8_t bit) {
+	uint8_t bit_index = 0;
+
+	if (bit < 72 && bit >= 8) {
+		// use generic.data
+        // bytes 1-8 = data
+		bit_index = bit - 8;
+	}
+	else {
+		// use generic.data_2
+        // byte 0 = type
+        if (bit >= 72) {
+            bit_index = bit - 64;
+        }
+
+        // byte 9 = check digit
+        if (bit < 8) {
+            bit_index = bit;
+        }
+
+        // mark for usage of data_2 instead of data
+		bit_index |= 0x80;
+	}
+
+	return bit_index;
 }
 
 static void subghz_protocol_decoder_vw_2_add_bit(SubGhzProtocolDecoderVw2* instance, bool level) {
@@ -987,12 +1025,18 @@ static void subghz_protocol_decoder_vw_2_add_bit(SubGhzProtocolDecoderVw2* insta
         return;
     }
 
-    if(level) {
-        uint8_t byte_index = instance->generic.data_count_bit / 8;
-        uint8_t bit_index = instance->generic.data_count_bit % 8;
+    const uint8_t bit_index_full = subghz_protocol_vw_2_const.min_count_bit_for_found - 1 - instance->generic.data_count_bit;
+	const uint8_t bit_index_masked = subghz_protocol_vw_2_get_bit_index(bit_index_full);
+	const uint8_t bit_index = bit_index_masked & 0x7F;
 
-        instance->data[byte_index] |= 1 << (7 - bit_index);
-    }
+	if (bit_read(bit_index_masked, 7)) {
+		// use data_2
+		bit_write(instance->generic.data_2, bit_index, level);
+	}
+	else {
+		// use data
+		bit_write(instance->generic.data, bit_index, level);
+	}
 
     instance->generic.data_count_bit++;
 

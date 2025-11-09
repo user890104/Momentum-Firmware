@@ -19,6 +19,10 @@ void aut64_decrypt(const struct aut64_key key, uint8_t message[]);
 
 #include "base.h"
 
+#ifndef REVERSE_BYTES_U64
+#define REVERSE_BYTES_U64(x) (REVERSE_BYTES_U32((x) >> 32) | REVERSE_BYTES_U32((x) & 0xFFFFFFFF) << 32)
+#endif
+
 #define SUBGHZ_PROTOCOL_VW_2_NAME "VW-2"
 
 typedef struct SubGhzProtocolDecoderVw2 SubGhzProtocolDecoderVw2;
