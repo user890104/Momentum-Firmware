@@ -92,7 +92,7 @@ static uint8_t key_nibble(const struct aut64_key key, const uint8_t nibble, cons
 static uint8_t round_key(const struct aut64_key key, const uint8_t state[], const uint8_t roundN) {
     uint8_t result_hi = 0, result_lo = 0;
 
-    for (int i = 0; i < AUT64_BLOCK_SIZE - 1; i++) {
+    for (uint8_t i = 0; i < AUT64_BLOCK_SIZE - 1; i++) {
         result_hi ^= key_nibble(key, state[i] >> 4, table_un[roundN], i);
         result_lo ^= key_nibble(key, state[i] & 0x0F, table_ln[roundN], i);
     }
@@ -108,15 +108,13 @@ static uint8_t final_byte_nibble(const struct aut64_key key, const uint8_t table
 static uint8_t encrypt_final_byte_nibble(const struct aut64_key key, const uint8_t nibble, const uint8_t table[]) {
     const uint8_t offset = final_byte_nibble(key, table);
     
-    int i;
-
-    for (i = 0; i < 16; i++) {
+    for (uint8_t i = 0; i < 16; i++) {
         if (table_offset[offset + i] == nibble) {
-            break;
+            return i;
         }
     }
 
-    return i;
+    return 0; // should never be reached
 }
 
 static uint8_t encrypt_compress(const struct aut64_key key, const uint8_t state[], const uint8_t roundN) {
@@ -152,7 +150,7 @@ static uint8_t substitute(const struct aut64_key key, const uint8_t byte) {
 static void permute_bytes(const struct aut64_key key, uint8_t state[]) {
     uint8_t result[AUT64_PBOX_SIZE] = { 0 };
     
-    for (int i = 0; i < AUT64_PBOX_SIZE; i++) {
+    for (uint8_t i = 0; i < AUT64_PBOX_SIZE; i++) {
         result[key.pbox[i]] = state[i];
     }
 
@@ -162,7 +160,7 @@ static void permute_bytes(const struct aut64_key key, uint8_t state[]) {
 static uint8_t permute_bits(const struct aut64_key key, const uint8_t byte) {
     uint8_t result = 0;
 
-    for (int i = 0; i < 8; i++) {
+    for (uint8_t i = 0; i < 8; i++) {
         if (byte & (1 << i)) {
             result |= (1 << key.pbox[i]);
         }
@@ -188,7 +186,7 @@ void aut64_encrypt(const struct aut64_key key, uint8_t message[]) {
     reverse_box(reverse_key.pbox, key.pbox, AUT64_PBOX_SIZE);
     reverse_box(reverse_key.sbox, key.sbox, AUT64_SBOX_SIZE);
 
-    for (int i = 0; i < AUT64_NUM_ROUNDS; i++) {
+    for (uint8_t i = 0; i < AUT64_NUM_ROUNDS; i++) {
         permute_bytes(reverse_key, message);
         message[7] = encrypt_compress(reverse_key, message, i);
         message[7] = substitute(reverse_key, message[7]);
@@ -198,7 +196,7 @@ void aut64_encrypt(const struct aut64_key key, uint8_t message[]) {
 }
 
 void aut64_decrypt(const struct aut64_key key, uint8_t message[]) {
-    for (int i = AUT64_NUM_ROUNDS - 1; i >= 0; i--) {
+    for (int8_t i = AUT64_NUM_ROUNDS - 1; i >= 0; i--) {
         message[7] = substitute(key, message[7]);
         message[7] = permute_bits(key, message[7]);
         message[7] = substitute(key, message[7]);
