@@ -27,6 +27,7 @@
 #define SUBGHZ_CAME_ATOMO_DIR_NAME    EXT_PATH("subghz/assets/came_atomo")
 #define SUBGHZ_NICE_FLOR_S_DIR_NAME   EXT_PATH("subghz/assets/nice_flor_s")
 #define SUBGHZ_ALUTECH_AT_4N_DIR_NAME EXT_PATH("subghz/assets/alutech_at_4n")
+#define SUBGHZ_VW_2_DIR_NAME          EXT_PATH("subghz/assets/vw_2")
 
 typedef struct SubGhzProtocolRegistry SubGhzProtocolRegistry;
 typedef struct SubGhzEnvironment SubGhzEnvironment;

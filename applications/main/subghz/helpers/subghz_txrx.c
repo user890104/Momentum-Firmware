@@ -50,6 +50,8 @@ SubGhzTxRx* subghz_txrx_alloc(void) {
         instance->environment, SUBGHZ_ALUTECH_AT_4N_DIR_NAME);
     subghz_environment_set_nice_flor_s_rainbow_table_file_name(
         instance->environment, SUBGHZ_NICE_FLOR_S_DIR_NAME);
+    subghz_environment_set_vw_2_keys_file_name(
+        instance->environment, SUBGHZ_VW_2_DIR_NAME);
     subghz_environment_set_protocol_registry(
         instance->environment, (void*)&subghz_protocol_registry);
     instance->receiver = subghz_receiver_alloc_init(instance->environment);

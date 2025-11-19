@@ -6,6 +6,7 @@ struct SubGhzEnvironment {
     const SubGhzProtocolRegistry* protocol_registry;
     const char* nice_flor_s_rainbow_table_file_name;
     const char* alutech_at_4n_rainbow_table_file_name;
+    const char* vw_2_keys_file_name;
     const char* mfname;
     uint8_t kl_type;
 };
@@ -17,6 +18,7 @@ SubGhzEnvironment* subghz_environment_alloc(void) {
     instance->protocol_registry = NULL;
     instance->nice_flor_s_rainbow_table_file_name = NULL;
     instance->alutech_at_4n_rainbow_table_file_name = NULL;
+    instance->vw_2_keys_file_name = NULL;
     instance->mfname = "";
     instance->kl_type = 0;
 
@@ -29,6 +31,7 @@ void subghz_environment_free(SubGhzEnvironment* instance) {
     instance->protocol_registry = NULL;
     instance->nice_flor_s_rainbow_table_file_name = NULL;
     instance->alutech_at_4n_rainbow_table_file_name = NULL;
+    instance->vw_2_keys_file_name = NULL;
     subghz_keystore_free(instance->keystore);
 
     free(instance);
@@ -90,6 +93,20 @@ const char*
     furi_check(instance);
 
     return instance->nice_flor_s_rainbow_table_file_name;
+}
+
+void subghz_environment_set_vw_2_keys_file_name(
+    SubGhzEnvironment* instance,
+    const char* filename) {
+    furi_check(instance);
+
+    instance->vw_2_keys_file_name = filename;
+}
+
+const char* subghz_environment_get_vw_2_keys_file_name(SubGhzEnvironment* instance) {
+    furi_check(instance);
+
+    return instance->vw_2_keys_file_name;
 }
 
 void subghz_environment_set_protocol_registry(

@@ -99,6 +99,10 @@ extern "C" {
      (((x) & 0xFF000000) >> 24))
 #endif
 
+#ifndef REVERSE_BYTES_U64
+#define REVERSE_BYTES_U64(x) (REVERSE_BYTES_U32((x) >> 32) | REVERSE_BYTES_U32((x) & 0xFFFFFFFF) << 32)
+#endif
+
 #ifndef FURI_BIT
 #define FURI_BIT(x, n) (((x) >> (n)) & 1)
 #endif

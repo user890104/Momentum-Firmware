@@ -205,6 +205,51 @@ void aut64_decrypt(const struct aut64_key key, uint8_t message[]) {
     }
 }
 
+void aut64_pack(uint8_t dest[], const struct aut64_key src)
+{
+    dest[0] = src.index;
+
+    for (uint8_t i = 0; i < sizeof(src.key) / 2; i++) {
+        dest[i + 1] = (src.key[i * 2] << 4) | src.key[i * 2 + 1];
+    }
+
+    uint32_t pbox = 0;
+
+    for (uint8_t i = 0; i < sizeof(src.pbox); i++) {
+        pbox = (pbox << 3) | src.pbox[i];
+    }
+
+    dest[5] = pbox >> 16;
+    dest[6] = (pbox >> 8) & 0xFF;
+    dest[7] = pbox & 0xFF;
+
+    for (uint8_t i = 0; i < sizeof(src.sbox) / 2; i++) {
+        dest[i + 8] = (src.sbox[i * 2] << 4) | src.sbox[i * 2 + 1];
+    }
+}
+
+void aut64_unpack(struct aut64_key *dest, const uint8_t src[])
+{
+    dest->index = src[0];
+
+    for (uint8_t i = 0; i < sizeof(dest->key) / 2; i++) {
+        dest->key[i * 2] = src[i + 1] >> 4;
+        dest->key[i * 2 + 1] = src[i + 1] & 0xF;
+    }
+
+    uint32_t pbox = (src[5] << 16) | (src[6] << 8) | src[7];
+
+    for (int8_t i = sizeof(dest->pbox) - 1; i >= 0; i--) {
+        dest->pbox[i] = pbox & 0x7;
+        pbox >>= 3;
+    }
+
+    for (uint8_t i = 0; i < sizeof(dest->sbox) / 2; i++) {
+        dest->sbox[i * 2] = src[i + 8] >> 4;
+        dest->sbox[i * 2 + 1] = src[i + 8] & 0xF;
+    }
+}
+
 #define TAG "SubGhzProtocolVw2"
 
 static const SubGhzBlockConst subghz_protocol_vw_2_const = {
@@ -273,12 +318,45 @@ const SubGhzProtocol subghz_protocol_vw_2 = {
     .filter = SubGhzProtocolFilter_Cars,
 };
 
-// Key goes here
-const struct aut64_key key = {
-    .key = { 0 },
-    .pbox = { 0 },
-    .sbox = { 0 },
-};
+static int8_t subghz_protocol_vw_2_keys_loaded = -1;
+static struct aut64_key subghz_protocol_vw_2_keys[SUBGHZ_PROTOCOL_VW_2_MAX_NUM_KEYS];
+
+static void subghz_protocol_vw_2_load_keys(const char* file_name) {
+    if (subghz_protocol_vw_2_keys_loaded >= 0) {
+		FURI_LOG_I(TAG, "Already loaded %u keys from %s, skipping load", subghz_protocol_vw_2_keys_loaded, file_name);
+		return;
+    }
+
+    FURI_LOG_I(TAG, "Loading keys from %s", file_name);
+
+	subghz_protocol_vw_2_keys_loaded = 0;
+
+    for (uint8_t i = 0; i < SUBGHZ_PROTOCOL_VW_2_MAX_NUM_KEYS; i++) {
+        uint8_t key_packed[AUT64_KEY_STRUCT_PACKED_SIZE];
+
+        if (subghz_keystore_raw_get_data(file_name, i * AUT64_KEY_STRUCT_PACKED_SIZE, key_packed,
+            AUT64_KEY_STRUCT_PACKED_SIZE)) {
+            aut64_unpack(&subghz_protocol_vw_2_keys[i], key_packed);
+            subghz_protocol_vw_2_keys_loaded++;
+        }
+        else {
+            FURI_LOG_E(TAG, "Unable to load key %u", i);
+            break;
+        }
+    }
+
+    FURI_LOG_I(TAG, "Loaded %u keys", subghz_protocol_vw_2_keys_loaded);
+}
+
+static struct aut64_key* subghz_protocol_vw_2_get_key(uint8_t index) {
+	for (uint8_t i = 0; i < MIN(subghz_protocol_vw_2_keys_loaded, SUBGHZ_PROTOCOL_VW_2_MAX_NUM_KEYS); i++) {
+		if (subghz_protocol_vw_2_keys[i].index == index) {
+			return &subghz_protocol_vw_2_keys[i];
+		}
+	}
+
+	return NULL;
+}
 
 // there is a problem with the function in lib/toolbox/manchester_decoder, so it is reimplemented
 // thanks to CodeAllNight (https://github.com/jamisonderek) for sharing his fixed version
@@ -371,6 +449,12 @@ void* subghz_protocol_encoder_vw_2_alloc(SubGhzEnvironment* environment) {
 
     instance->base.protocol = &subghz_protocol_vw_2;
     instance->generic.protocol_name = instance->base.protocol->name;
+
+    const char* vw_2_keys_file_name = subghz_environment_get_vw_2_keys_file_name(environment);
+
+    if (vw_2_keys_file_name) {
+        subghz_protocol_vw_2_load_keys(vw_2_keys_file_name);
+    }
 
     instance->encoder.repeat = 1;
     instance->encoder.size_upload =
@@ -579,6 +663,13 @@ void* subghz_protocol_decoder_vw_2_alloc(SubGhzEnvironment* environment) {
     SubGhzProtocolDecoderVw2* instance = malloc(sizeof(SubGhzProtocolDecoderVw2));
     instance->base.protocol = &subghz_protocol_vw_2;
     instance->generic.protocol_name = instance->base.protocol->name;
+
+    const char* vw_2_keys_file_name = subghz_environment_get_vw_2_keys_file_name(environment);
+
+    if (vw_2_keys_file_name) {
+        subghz_protocol_vw_2_load_keys(vw_2_keys_file_name);
+    }
+
     return instance;
 }
 
@@ -907,6 +998,13 @@ static void subghz_protocol_vw_2_decode_data(SubGhzBlockGeneric* generic) {
 	uint8_t type = (generic->data_2 >> 8) & 0xFF;
 
     if (type == 0xC0) {
+		const struct aut64_key *key = subghz_protocol_vw_2_get_key(3);
+
+		if (!key) {
+			FURI_LOG_W(TAG, "Key not found: 3");
+			goto no_key;
+		}
+
 		FURI_LOG_D(TAG, "Before decrypt: %016llX", generic->data);
 
 	    union {
@@ -916,7 +1014,7 @@ static void subghz_protocol_vw_2_decode_data(SubGhzBlockGeneric* generic) {
 
 		data.full = REVERSE_BYTES_U64(generic->data);
 
-		aut64_decrypt(key, data.split);
+		aut64_decrypt(*key, data.split);
 
 		FURI_LOG_D(TAG, "After decrypt: %016llX", REVERSE_BYTES_U64(data.full));
 
@@ -929,6 +1027,8 @@ static void subghz_protocol_vw_2_decode_data(SubGhzBlockGeneric* generic) {
         generic->cnt = data.split[6] << 16 | data.split[5] << 8 | data.split[4];
         generic->btn = data.split[7] >> 4;
     }
+
+no_key:
 
     // Save original button for later use
     if (subghz_custom_btn_get_original() == 0) {
@@ -944,6 +1044,13 @@ static void subghz_protocol_vw_2_encode_data(SubGhzBlockGeneric* generic) {
 	uint8_t type = (generic->data_2 >> 8) & 0xFF;
 
     if (type == 0xC0) {
+		const struct aut64_key *key = subghz_protocol_vw_2_get_key(3);
+
+		if (!key) {
+			FURI_LOG_W(TAG, "Key not found: 3");
+			goto no_key;
+		}
+
 	    union {
 	        uint64_t full;
 	        uint8_t split[sizeof(uint64_t)];
@@ -960,7 +1067,7 @@ static void subghz_protocol_vw_2_encode_data(SubGhzBlockGeneric* generic) {
 
 		FURI_LOG_D(TAG, "Before encrypt: %016llX", REVERSE_BYTES_U64(data.full));
 
-        aut64_encrypt(key, data.split);
+        aut64_encrypt(*key, data.split);
 
         generic->data = REVERSE_BYTES_U64(data.full);
 
@@ -989,6 +1096,8 @@ static void subghz_protocol_vw_2_encode_data(SubGhzBlockGeneric* generic) {
             // TODO 0x80 Panic button + combinations
         }
     }
+
+no_key:
 }
 
 static uint8_t subghz_protocol_vw_2_get_bit_index(const uint8_t bit) {

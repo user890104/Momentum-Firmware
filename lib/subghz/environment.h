@@ -89,6 +89,22 @@ const char*
     subghz_environment_get_nice_flor_s_rainbow_table_file_name(SubGhzEnvironment* instance);
 
 /**
+ * Set filename to work with VW-2.
+ * @param instance Pointer to a SubGhzEnvironment instance
+ * @param filename Full path to the file
+ */
+void subghz_environment_set_vw_2_keys_file_name(
+    SubGhzEnvironment* instance,
+    const char* filename);
+
+/**
+ * Get filename to work with VW-2.
+ * @param instance Pointer to a SubGhzEnvironment instance
+ * @return Full path to the file
+ */
+const char* subghz_environment_get_vw_2_keys_file_name(SubGhzEnvironment* instance);
+
+/**
  * Set list of protocols to work.
  * @param instance Pointer to a SubGhzEnvironment instance
  * @param protocol_registry_items Pointer to a SubGhzProtocolRegistry

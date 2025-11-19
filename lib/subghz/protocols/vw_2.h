@@ -9,19 +9,20 @@
 #define AUT64_SBOX_SIZE 16
 
 struct aut64_key {
+    uint8_t index;
     uint8_t key[AUT64_KEY_SIZE];
     uint8_t pbox[AUT64_PBOX_SIZE];
     uint8_t sbox[AUT64_SBOX_SIZE];
 };
 
+#define AUT64_KEY_STRUCT_PACKED_SIZE 16
+
 void aut64_encrypt(const struct aut64_key key, uint8_t message[]);
 void aut64_decrypt(const struct aut64_key key, uint8_t message[]);
+void aut64_pack(uint8_t dest[], const struct aut64_key src);
+void aut64_unpack(struct aut64_key *dest, const uint8_t src[]);
 
 #include "base.h"
-
-#ifndef REVERSE_BYTES_U64
-#define REVERSE_BYTES_U64(x) (REVERSE_BYTES_U32((x) >> 32) | REVERSE_BYTES_U32((x) & 0xFFFFFFFF) << 32)
-#endif
 
 #define SUBGHZ_PROTOCOL_VW_2_NAME "VW-2"
 
@@ -31,6 +32,8 @@ typedef struct SubGhzProtocolEncoderVw2 SubGhzProtocolEncoderVw2;
 extern const SubGhzProtocolDecoder subghz_protocol_vw_2_decoder;
 extern const SubGhzProtocolEncoder subghz_protocol_vw_2_encoder;
 extern const SubGhzProtocol subghz_protocol_vw_2;
+
+#define SUBGHZ_PROTOCOL_VW_2_MAX_NUM_KEYS 3
 
 /**
  * Allocate SubGhzProtocolEncoderVw2.

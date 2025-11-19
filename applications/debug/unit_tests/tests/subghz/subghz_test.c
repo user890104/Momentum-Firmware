@@ -47,6 +47,8 @@ static void subghz_test_init(void) {
         environment_handler, NICE_FLOR_S_DIR_NAME);
     subghz_environment_set_alutech_at_4n_rainbow_table_file_name(
         environment_handler, ALUTECH_AT_4N_DIR_NAME);
+    subghz_environment_set_vw_2_keys_file_name(
+        environment_handler, SUBGHZ_VW_2_DIR_NAME);
     subghz_environment_set_protocol_registry(
         environment_handler, (void*)&subghz_protocol_registry);
 
